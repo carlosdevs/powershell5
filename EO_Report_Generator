@@ -1,0 +1,337 @@
+<#----------------------------------------------------------------------------------------------------------------------------
+Name: EO Report Generator v 2.5
+Created: Jan 2017
+
+Description:
+    Generates the final EO Report for the daily meeting  based on the excel sheet (input) provided in this directory.
+ 
+File types: pdf, xlsx, png
+
+Bugs/Fixes/Enhancements:
+    2-24-2017 - Bug. ITHD usually sends a PDF report and an xls version too. Today, only the "xls" version was submitted and 
+                the generator failed to grab the xls. The fix will now account for this. Tested, works.
+    
+    3/23/2017 - (ver 2.3) Enhancement. Added "Pages to keep" on the excel input file. Script now accepts the pages one wants
+                to keep for the final report.
+                Converted the '.bat' to an executable (version control). Merged most of the files into one folder (clean-up).
+
+    3/30/2017 - (ver 2.4) Enhancement. The script now moves old email reports and grabs only "Today's" email reports to
+                generate the EO Report.
+
+    5/3/2017  - (ver 2.5) Enhancement. Added Cherwell and WAR ticket count scripts. The ticket counts are for the previous 
+                day (yesterday's), unless the EO report is generated on a Monday. If Monday, the ticket count inclues 
+                Fri-Sun tickets.
+
+    7/26/2017 - Enhancement. Network ops usually sends a pdf report, however, today only the xls format was submitted and the
+                script failed to grab the report. The script will now account for this.
+-------------------------------------------------------------------------------------------------------------------------------#>
+
+#dirs
+function cDir{
+ [CmdletBinding()]
+ param([string]$dir)
+
+ if(test-path $dir){
+    Remove-Item "$dir\*" -Recurse -Force
+ } else {
+    mkdir $dir -Force
+ }
+}
+
+#date suffix
+function datesuffix([datetime]$Date) {
+    switch -regex ($Date.Day.ToString()) {
+        '1(1|2|3)$' { 'th'; break }
+        '.?1$'      { 'st'; break }
+        '.?2$'      { 'nd'; break }
+        '.?3$'      { 'rd'; break }
+        default     { 'th'; break }
+    }
+}
+
+function eo_info(){
+    Write-Host "`nName    : EO Report Generator ver 2.5" -ForegroundColor DarkCyan
+    Write-Host "Created : Jan 2017" -ForegroundColor DarkGreen
+    Write-Host "Author  : Carlo" -ForegroundColor DarkGreen
+    Write-Host "Updated : 3-Aug-2017`n" -ForegroundColor DarkGreen
+}
+
+#-------------------------------------------------------
+
+#temp dirs
+$tempdirs = "c:\temp\EO_temp\eo_first_files", "c:\temp\EO_temp\eo_in_out", "c:\temp\EO_temp\EO_excel", `
+"c:\temp\EO_temp\EO_report_complete", "c:\temp\EO_temp\eo_pre_final", "c:\temp\EO_temp\ticket_count"
+foreach($t in $tempdirs){
+    cDir -dir $t
+}
+
+$dir_first = "c:\temp\EO_temp\eo_first_files"
+$dir_inout = "c:\temp\EO_temp\eo_in_out"
+$dir_prefinal = "c:\temp\EO_temp\eo_pre_final"
+$dir_final = "c:\temp\EO_temp\EO_report_complete"
+$dir_excel = "c:\temp\EO_temp\EO_excel"
+$dir_root = "."
+$dir_ticket_count = "c:\temp\EO_temp\ticket_count"
+
+eo_info;
+
+#header
+Copy-Item "$dir_root\dependencies\EO_header\EO_report_header.docx" -Destination "$dir_prefinal\"
+$eo_word = New-Object -ComObject Word.Application
+Get-ChildItem -Path "$dir_prefinal" -Filter *header*.doc? | ForEach-Object {
+    $document2 = $eo_word.Documents.Open($_.FullName)    
+    $pdf_filename = "$($_.DirectoryName)\$("AA - AA_" + $_.BaseName).pdf"
+    $document2.SaveAs([ref] $pdf_filename, [ref] 17)
+    $document2.Close()
+}
+
+$eo_word.Quit()
+Remove-Item -Path "$dir_prefinal\EO_report_header.docx"
+
+#Excel sequential order from excel
+Copy-Item "$dir_root\Modify_Report_Output\Modify_Reports.xlsx" -Destination "$dir_excel\"
+
+#Outlook
+$outlook = New-Object -ComObject outlook.application
+$o = $outlook.getnamespace("MAPI")
+
+$account = $o.Folders | ? {$_.Name -eq 'EOReports@aa.com'}
+$inbox = $account.Folders | ? {$_.Name -match 'Inbox'}
+$emMv = $account.Folders | ? {$_.Name -eq 'Archive'}
+
+#Excel obj
+$mod_report_file = "$dir_excel\Modify_Reports.xlsx"
+$sheetName = "Sheet1"
+$objexcel = New-Object -ComObject Excel.Application
+$wrkbk = $objexcel.Workbooks.Open($mod_report_file)
+$sheet = $wrkbk.Worksheets.Item($sheetName)
+$objexcel.Visible = $false
+
+#seq, subject
+$rmx = ($sheet.UsedRange.Rows).count
+$rSeq,$colSeq = 1,1
+$rSubject,$colSubject = 1,2
+
+#Inbox items
+$em = $inbox.Items
+
+#attachments
+$em3 = $inbox.Items
+
+#count
+$eCount = $em.count
+
+#Date
+$tDt = Get-Date -Format "MMddyyy"
+$indx = $eCount
+
+$pr = "."
+Write-Host "`nArchiving old reports..." -NoNewline
+#Archive old emails
+for($eCount; $eCount -gt 0; $eCount--){    
+    $dt = $em | Select-Object -Property ReceivedTime | Select-Object -index ($eCount - 1)
+    $dt2 = $dt.ReceivedTime.ToString("MMddyyyy")
+
+    $em2 = $inbox.Items[$eCount]
+    if($dt2 -lt "$tDt"){
+        Write-Host $pr -NoNewline
+        $em2.move($emMv) | Out-Null
+    } else {}
+}
+
+write-host "`nGenerating ticket count graph..." -ForegroundColor Cyan
+Start-Sleep -Milliseconds 100
+#get all attachments
+$em3 | foreach {
+    $emailSubject = $_.Subject | foreach {$_ -replace "[/:,\*?<>|]", "-"}
+    $_.attachments | foreach {    
+        if ($_.fileName.Contains("pdf")) {
+            $_.saveasfile((Join-Path $dir_first "$emailSubject.pdf"))
+        } elseif($_.fileName.Contains("png")){
+            $_.saveasfile((Join-Path $dir_first "$emailSubject.png"))
+        } elseif($_.fileName.Contains("ITHD") -and $_.fileName.Contains("xls")){
+            $_.saveasfile((Join-Path $dir_first "$emailSubject.xls"))
+        } elseif($_.fileName.Contains("Network Operations") -and $_.fileName.Contains("xls")){
+			$_.saveasfile((join-path $dir_first "$emailSubject.xls"))
+		}
+		else {}
+    }     
+}
+
+#equinix report
+$equinix = Get-ChildItem "$dir_first\" -filter "*Equinix*.png" | select $_.fullname
+if([string]::IsNullOrEmpty($equinix) -or $equinix -eq ""){
+} else {
+    $imgToPDFdir = "$dir_root\dependencies\ImgToPDF\"
+    $cmd = "$imgToPDFdir\img2pdf.exe"
+    &$cmd -landscape "$dir_first\$equinix" "$dir_first\Equinix VOIP.pdf"
+    Remove-Item "$dir_first\$equinix"
+}
+
+#ITHD report
+if(test-path "$dir_first\*ITHD*Stats*"){
+    $ithd = Get-ChildItem "$dir_first\*" -Include "*ITHD*Stats*" | select $_.fullName
+    $pdf_ = 1
+    
+    if($ithd -match "pdf" -and $pdf_ -eq 1){
+           
+        if($ithd -match "xls"){
+            Remove-Item "$dir_first\*ITHD*Stats*.xls"
+        }
+    } else {
+        $pdf_ = 0
+        if($ithd -match "xls" -and $pdf_ -eq 0){
+            $ithd = Get-ChildItem "$dir_first\*" -Include "*ITHD*Stats*" | select $_.fullName | ? {$_.Extension -eq ".xls"}
+            $xlFixedFormat = “Microsoft.Office.Interop.Excel.xlFixedFormatType” -as [type]
+            $ithdExcel = New-Object -ComObject excel.application
+            $ithdExcel.visible = $false
+
+            $filepath = Join-Path -Path "$dir_first\" -ChildPath ($ithd.BaseName + “.pdf”)
+            $workbook2 = $ithdExcel.workbooks.open($ithd.fullname, 3)
+            $workbook2.Saved = $true
+            $workbook2.ExportAsFixedFormat($xlFixedFormat::xlTypePDF,$filepath)
+            $ithdExcel.Quit()
+
+            Start-Sleep -Seconds 1
+            Remove-Item "$dir_first\*ITHD*Stats*.xls"
+        }           
+      }
+} else {}
+
+#Network ops report
+if(test-path "$dir_first\*Network Operations Stand Up*"){
+	$netwrk = get-childitem "$dir_first\*" -include "*Network Operations Stand Up*" | select $_.fullName
+	$pdf_2 = 1
+	
+	if($netwrk -match "pdf" -and $pdf_2 -eq 1){
+		if($netwrk -match "xls"){
+			remove-item "$dir_first\*Network Operations Stand Up*.xls"
+		}
+	} else{
+		$pdf_2 = 0
+		if($netwrk -match "xls" -and $pdf_2 -eq 0){
+            $netwrk = get-childitem "$dir_first\*" -include "*Network Operations Stand Up*" | select $_.fullName | ? {$_.Extension -eq ".xls"}
+			$xlsFixedFormat2 = “Microsoft.Office.Interop.Excel.xlFixedFormatType” -as [type]
+			$netwrkExcel = New-Object -ComObject excel.application
+            $netwrkExcel.visible = $false
+			
+			$filepath2 = join-path -path "$dir_first\" -childpath ($netwrk.BaseName + ".pdf")
+			$netWorkbook = $netwrkExcel.workbooks.open($netwrk.fullname, 3)
+			$netWorkbook.saved = $true
+			$netWorkbook.exportasfixedformat($xlsFixedFormat2::xlTypePDF,$filepath2)
+			$netwrkExcel.Quit()
+			
+			start-sleep -seconds 1
+			remove-item "$dir_first\*Network Operations Stand Up*.xls"
+		}
+	}
+}else{}
+
+write-host "`nGenerating EO Report...`n" -ForegroundColor yellow
+#######
+#To be paired with Cherwell and WAR scripts.
+#ITOC_ticket_count
+$itoc_tickets = $false
+while($itoc_tickets -eq $false){
+    if(Test-Path "$dir_ticket_count\ITOC - Ticket count.pdf"){
+        $itoc_tickets = $true
+    } else {
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+Copy-Item "$dir_ticket_count\ITOC - Ticket count.pdf" -Destination $dir_first
+#######
+
+#sequential order, dir = first files
+for($i = 1; $i -le $rmx - 1; $i++){
+    $sequence = $sheet.Cells.Item($rSeq + $i, $colSeq).text
+    $subject = $sheet.Cells.Item($rSubject + $i, $colSubject).text
+    $subRename = $sheet.Cells.Item($rSubject + $i, $colSubject).text | foreach {$_ -replace "[/:,\*?<>|]", "-"}
+    
+    if($subject -eq "" -or [string]::IsNullOrEmpty($subject)){
+        break;
+    } else {
+        Get-ChildItem -path "$dir_first\*$subject*.pdf" | Rename-Item -NewName "$subRename.pdf"
+    }
+}
+
+#sejda pdf merger
+$mvMax = ($sheet.UsedRange.Rows).count
+$mSeq,$colmSeq = 1,1
+$mSubject,$colmSubject = 1,2
+$rPages,$colPages = 1,3
+
+for($j = 1; $j -le $mvMax - 1; $j++){
+    $seq = $sheet.Cells.Item($mSeq + $j, $colmSeq).text
+    $sub = $sheet.Cells.Item($mSubject + $j, $colmSubject).text
+    $pgs = $sheet.Cells.Item($rPages + $j, $colPages).text
+    $sub2Rename = $sheet.Cells.Item($mSubject + $j, $colmSubject).text | foreach {$_ -replace "[/:,\*?<>|]", "-"}
+    
+    $moveMe = Get-ChildItem -Path "$dir_first\$sub.pdf" | % {$_.BaseName}
+    if($sub -eq "" -or [string]::IsNullOrEmpty($sub)){
+        break;
+    } elseif($moveMe -eq $sub -or $moveMe -eq $sub2Rename){
+        Move-Item "$dir_first\$moveMe.pdf" $dir_inout
+        Rename-Item "$dir_inout\$moveMe.pdf" -NewName "$seq - $moveMe.pdf"
+
+        #pages
+        $cmd = "$dir_root\dependencies\sejda-console-3.0.0.M29\bin\sejda-console"
+        if($pgs -eq "" -or [string]::IsNullOrEmpty($pgs)){
+            Move-Item "$dir_inout\$seq - $moveMe.pdf" $dir_prefinal
+        } else {
+            &$cmd extractpages -f "$dir_inout\$seq - $moveMe.pdf" -o "$dir_prefinal\" -s "$pgs" 
+        }        
+    }
+}
+
+#quit
+$objExcel.quit()
+
+#mg all
+$cmd = "$dir_root\dependencies\sejda-console-3.0.0.M29\bin\sejda-console"
+&$cmd merge -d "$dir_prefinal\" -o "$dir_final\EO_report_complete.pdf" 
+
+#final report
+$d_date = Get-Date -Format M
+$date_suffix = datesuffix $d_date
+Get-ChildItem -Path "$dir_final\EO_report_complete.pdf" | Rename-Item -NewName "Daily EO Report $d_date$date_suffix.pdf"
+
+#final dir
+#Invoke-Item $dir_final
+#Invoke-Item "$dir_final\Daily EO Report $d_date$date_suffix.pdf"
+
+start-sleep	-seconds 3
+
+$fReport = $false
+
+while($fReport -eq $false){
+    if(Test-Path "$dir_final\Daily EO Report $d_date$date_suffix.pdf"){
+        $fReport = $true
+    } else {
+        Start-Sleep -Seconds 1
+    }
+}
+
+
+$aug = "X:\08_Aug 2017"
+$sept = "X:\09_Sep 2017"
+#Copy-Item "$dir_final\Daily EO Report $d_date$date_suffix.pdf" -Destination "X:\08_Aug 2017" -Force
+
+$month_num = (Get-Date).Month
+
+if($month_num -eq 8){
+    Copy-Item "$dir_final\Daily EO Report $d_date$date_suffix.pdf" -Destination "$aug" -Force
+} elseif($month_num -eq 9){
+    Copy-Item "$dir_final\Daily EO Report $d_date$date_suffix.pdf" -Destination "$sept" -Force
+} else{
+    Copy-Item "$dir_final\Daily EO Report $d_date$date_suffix.pdf" -Destination "X:\" -Force
+}
+
+
+#to DL_EO_Reports_Meeting@--.com
+$body = "Attached is the daily EO Report.`n`nRegards,`nCarlo"
+Send-MailMessage -to "DL_EO_Reports_Meeting@--.com" -from "ITOperationsCenter@--.com" -subject "Daily EO Report" -SmtpServer "----------.com" -Body $body -Attachments "$dir_final\Daily EO Report $d_date$date_suffix.pdf"
+
+
+
